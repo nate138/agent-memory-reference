@@ -1,0 +1,32 @@
+# Sensitive lists — generated from your own source of truth, NEVER committed.
+# Named here as defense-in-depth: even an accidental blanket `git add` cannot
+# sweep these in.
+*.deny
+*.allow
+known-sensitive.deny
+safe-terms.allow
+
+# The vault and quarantine hold session memory and held-for-review content.
+# Neither belongs in a public repo, in any form.
+vault/
+quarantine/
+
+# Local runtime config (copy the .example.json and fill in your own).
+memory-config.json
+
+# Generated code-graph output — real graph data is never published.
+graph-out/
+graphify-out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
