@@ -1,255 +1,248 @@
 # Agent Memory Reference
 
-A teaching reference for a **local, privacy-first persistent-memory and code-graph
-system for AI coding agents.** It shows how to give a coding agent durable memory of a
-codebase and of past decisions — without letting sensitive data leak into that memory
-along the way.
+This is a reference for a **local, privacy-first memory and code-graph system for AI
+coding agents** — a way to give a coding agent a durable "second brain" for a codebase,
+without letting sensitive data leak into that brain along the way.
 
-This repository is a **clean-room reference, not a product and not a drop-in library.**
-It is authored fresh to teach the architecture. It deliberately omits the
-implementation-specific details (real detection patterns, real paths, a real stack, real
-skill definitions) that would make it a paste-and-run tool, because those details are
-exactly where a privacy-first system leaks. What is here is the shape of the system and
-the reasoning behind each guardrail — enough to build your own version deliberately,
-which is the only way a system like this should be built.
+It's a **clean-room reference, not a product or a drop-in library.** I wrote it fresh to
+teach the architecture. It leaves out the implementation-specific details — real detection
+patterns, real paths, the actual stack, the real skill definitions — partly because those
+are the parts that would leak, and partly because a system like this should be built
+deliberately, by hand, not pasted in. What's here is the shape of the system and the
+reasoning behind each guardrail. That's the part worth sharing.
 
 ---
 
-## The problem
+## Why I built this
 
-Give an AI coding agent a persistent memory — a vault of notes it writes at the end of
-each working session — and you get a real productivity gain: the agent cold-starts its
-next session already knowing the project's decisions, constraints, and hard-won lessons.
+I'm a self-taught developer working solo on a large codebase. The thing that pushed me to
+build this was mundane: I was tired of re-explaining my own project to an AI agent at the
+start of every session. Every new chat started from zero — what the project was, what had
+already been decided, where things lived. On a big codebase that adds up fast, both in my
+time and in the agent's: it would burn through its context window searching around just to
+find the paths and files it needed before it could do any actual work.
 
-You also get a new hazard. Whatever the agent writes into that vault is now sitting in
-plain files on disk, and if the codebase touches customer-adjacent data, some fraction
-of what flows through a working session is sensitive: a customer email quoted in a stack
-trace, an account identifier pasted into a debugging note, a real name in a git author
-header. Write that into the vault unfiltered and you have quietly built a second,
-unaudited copy of your most sensitive data — one that no compliance boundary is watching.
+So the goal was simple to state: let the agent cold-start a session already knowing the
+project, so recon and auditing are fast and it isn't spending context just to figure out
+where everything is.
 
-The naive fix is a regex sweep on the way in: match the obvious identifiers, mask them,
-write the rest. This is not enough, and treating it as enough is the actual failure mode.
-Regex catches the *structured* identifiers — the ones with a predictable shape. It misses
-the unstructured ones: a person's name has no regex; a street address only sometimes
-does; a novel identifier format you have never seen has none at all. A pipeline that
-optimizes only for "catch everything with a pattern" passes exactly the dangerous,
-un-patterned residue straight through.
+The constraint I put on that goal is where most of the real work went. I'm cautious by
+nature about sensitive data — and this codebase handles customer and payment information,
+with real compliance obligations attached. After working through some cybersecurity
+coursework, I've built everything since from a security-first position: design the
+protection in from the start, don't bolt it on afterward. A memory system that quietly
+accumulates a second copy of your most sensitive data is exactly the kind of thing that
+looks convenient and turns into an incident. So the memory had to be useful *and* it had
+to be safe by construction. The rest of this document is mostly about how those two goals
+are held together.
 
-So redaction here is treated as **architecture, not a feature.** The rest of this
-document is that architecture.
+*(On my background: I spent 25 years as a tattoo artist and ran my own shop before moving
+into development. That's a strange line on a technical README, but the work rails more than
+you'd think — precision on something permanent, reading what a client actually wants,
+problem-solving to get there. I came to security through Coursera's cybersecurity, IT, and
+AI courses, and it stuck as a way of thinking, not just a checklist.)*
+
+---
+
+## What the system does, in plain terms
+
+Three pieces work together:
+
+**A vault (a "second brain").** A folder of plain markdown notes the agent reads at the
+start of a session and writes to at the end — but only the information I've given it
+permission to keep. It holds decisions, lessons, and context, not code and not customer
+data.
+
+**A code graph.** A local tool maps the codebase into a graph of nodes — files and the
+connections between them at every level. Select a node and you see what it's connected to.
+Instead of reading through source to understand how things link up, the agent (and I) can
+query the map. This is the part that makes recon fast.
+
+**A redaction pipeline in front of the vault.** Nothing reaches the vault until it passes
+a strict, two-stage redaction check. Anything that doesn't pass cleanly doesn't get
+written — it goes to a quarantine folder for me to review by hand. The chats and code
+sessions that end up in the vault have all been through that filter.
+
+And one habit layered on top: if the agent and I have done something by hand twice, that's
+the signal it might be worth turning into a reusable skill — a named routine instead of a
+procedure we re-derive every time.
+
+The payoff is context efficiency. The agent thinks less about *where things are* and spends
+its budget on the actual work.
 
 ---
 
 ## Two-stage, deny-first redaction
 
-The core idea: **two stages, and the second one is allowed to be wrong in the safe
-direction.**
+The core idea is two stages, and the second one is allowed to be wrong in the safe
+direction.
 
-**Stage 1 — pattern redaction.** Mask the structured identifiers that have a reliable
-shape: account-style tokens, emails, phone numbers, bearer tokens and JWTs, high-entropy
-key-like runs. Replace each with a typed placeholder so the redacted text stays readable
-(`[EMAIL]`, `[ACCOUNT]`, and so on). This catches the obvious majority cheaply and fast.
-It does not catch everything, and it is not asked to.
+**Stage 1 — pattern redaction.** Mask the identifiers that have a reliable shape:
+account-style tokens, emails, phone numbers, bearer tokens, high-entropy key-like runs.
+Each becomes a typed placeholder so the text stays readable (`[EMAIL]`, `[ACCOUNT]`, and so
+on). This catches the obvious majority, cheaply. It doesn't catch everything, and it isn't
+asked to.
 
-**Stage 2 — heuristic gate.** After Stage 1, scan the *remaining* text for signals that
-PII might still be present even without a clean pattern to match. This is where the
-un-patterned residue gets caught. The heuristics look for *shapes*, not exact matches:
+**Stage 2 — heuristic gate.** After Stage 1, scan the *remaining* text for signs that PII
+might still be there even without a clean pattern to match. This is where the un-patterned
+stuff gets caught. It looks for shapes, not exact matches:
 
-- Capitalized word-pairs sitting next to relationship keywords (near words like
-  "member," "customer," "client," "owner") — a name-shaped thing in a name-suggesting
-  context.
-- Street-address shapes: a number followed by capitalized words and a street-type suffix.
+- Capitalized word-pairs sitting next to relationship words ("member," "customer,"
+  "client," "owner") — a name-shaped thing in a name-suggesting spot.
+- Street-address shapes: a number, capitalized words, a street-type suffix.
 - Postal-code and ZIP shapes.
-- Date-of-birth-adjacent strings near birth-related keywords.
-- Any token Stage 1 flagged as *maybe* a key but could not confirm.
-- A local, hand-maintained denylist of known-sensitive strings, generated from your own
-  source of truth and never committed.
+- Date-of-birth-adjacent strings near birth-related words.
+- Anything Stage 1 flagged as *maybe* a key but couldn't confirm.
+- A local, hand-maintained denylist of known-sensitive strings — generated from my own
+  source of truth, never committed.
 
-Any Stage-2 hit does not get masked and written. It gets **quarantined** — held in a
-separate directory, outside the vault, with a note recording which heuristic fired — for
-a human to review before it is ever indexed.
+Any Stage-2 hit is **quarantined**, not masked-and-written: held outside the vault, with a
+note saying which heuristic fired, for me to review before it's ever indexed.
 
-**The deliberate tradeoff.** These heuristics over-flag by design. A capitalized word-pair
-near "owner" might be a real customer name or might be the phrase "Project Owner." Stage 2
-cannot always tell, so it quarantines both. This produces false positives, and that is the
-correct choice: **over-flagging costs a thirty-second review; under-flagging costs an
-incident.** A redaction system tuned to minimize review friction is tuned in the wrong
-direction. The review pile is not a bug in the design — it is the design working.
+**The tradeoff is deliberate.** These heuristics over-flag on purpose. A capitalized pair
+near "owner" might be a real customer name or might be the phrase "Project Owner" — Stage 2
+can't always tell, so it holds both. That produces false positives, and that's the correct
+direction to be wrong in: **over-flagging costs a thirty-second review; under-flagging
+costs an incident.** The review pile isn't a flaw in the design. It's the design working.
 
-**Fail closed.** If the pipeline cannot fully process a file — a parse error, malformed
-input, anything unexpected — it does not write a partially-scanned file into the vault. It
-quarantines it. The system never writes a file it did not fully scan. A crash resolves
-toward *hold*, never toward *pass*.
+**Fail closed.** If the pipeline can't fully process a file — a parse error, malformed
+input, anything unexpected — it doesn't write a half-scanned file to the vault. It
+quarantines it. A crash resolves toward *hold*, never toward *pass*.
 
-**Two modes.** A strict mode (Stage 1 + Stage 2, quarantine on any Stage-2 hit) for
-repositories that touch customer-adjacent data, and a lighter pattern-only mode for
-repositories that provably carry no such data. The strict mode is the default; the lighter
-mode is a deliberate opt-out you make per-repository, not a convenience you reach for.
+There are two modes: a strict mode (both stages, quarantine on any Stage-2 hit) for
+anything touching customer-adjacent data, and a lighter pattern-only mode for repos that
+provably carry none. Strict is the default. The lighter mode is a per-repo decision you
+make on purpose, not a convenience you reach for.
 
-A reference skeleton for this pipeline lives in [`redaction/`](./redaction/), with
-illustrative patterns authored fresh for teaching. They are examples of the *shape* of
-Stage 1, not a detection ruleset to rely on — write your own against your own data.
+A reference skeleton lives in [`redaction/`](./redaction/). The patterns in it are written
+fresh, as examples of the *shape* of each stage — not a detection ruleset to rely on. Write
+your own against your own data, and expect to tune it for a while before you trust it.
 
 ---
 
 ## AST-only code graph
 
-The second half of the system is a **code-structure graph**: a queryable map of a
-codebase's modules, imports, and call relationships, so the agent can ask "what touches
-this?" without reading every file. This is generated by a local, third-party AST parser.
+The graph is generated by a local, third-party AST parser. Two rules keep it safe.
 
-Two postures make it safe:
+**AST-only. Never deep mode.** The parser has a "deep" mode that sends code structure to an
+external service for richer analysis. On any repo with customer-adjacent data, that mode is
+*forbidden* — and the rebuild trigger is written so deep mode structurally can't fire, not
+just left switched off. AST-only analysis runs entirely on my machine; nothing leaves the
+box. That's the whole reason the tool is acceptable to run, so it's enforced in code, not
+left to memory.
 
-**AST-only. Never deep mode.** The parser has a "deep" mode that sends code structure to
-an external LLM for richer analysis. On any repository with customer-adjacent data, that
-mode is **forbidden** — not discouraged, forbidden — and the rebuild trigger is written so
-that deep mode is structurally unable to fire, not merely left unset. AST-only analysis
-runs entirely on your machine; nothing leaves the box. That property is the whole reason
-the tool is acceptable to run at all, so it is enforced in code rather than trusted to
-habit.
+**No automatic post-commit hook.** The obvious way to keep a graph current is to rebuild on
+every commit. I deliberately don't. It puts a third-party binary on the automatic commit
+path, adds latency to every commit on a large repo, and sits too close to git operations
+that need to stay clean and serial. Instead the rebuild is an explicit trigger I run on
+demand or at a checkpoint. If I ever automate it, the right place is a pre-push hook — which
+fires far less often — never pre-commit, and never on the customer-data repo first.
 
-**No automatic post-commit hook.** The obvious way to keep a graph current is a
-post-commit hook that rebuilds on every commit. This reference deliberately does not do
-that, for three reasons: it puts a third-party binary on the automatic commit path; graph
-rebuilds add latency to every commit on a large repository; and an automatic hook sits
-uncomfortably close to serial-only git operations that must never be wrapped by other
-tooling. Instead, the rebuild is an **explicit, flag-locked trigger** you invoke on demand
-or at a verification checkpoint. If automation is ever wanted, the right place for it is a
-pre-push hook — which fires far less often and still keeps the graph current before code
-leaves the machine — never pre-commit, and never on a customer-data repository first.
-
-A reference skeleton for the rebuild trigger lives in [`graph/`](./graph/), with the
-deep-mode refusal shown as the load-bearing line.
+A reference skeleton for the rebuild trigger is in [`graph/`](./graph/), with the deep-mode
+refusal as the line that matters.
 
 ---
 
-## Auditing the third-party parser before it runs
+## Auditing the parser before it runs
 
-The graph parser is third-party code that reads your entire codebase. It gets audited
-before it touches a single repository. Their work is reference; the version that runs is
-the one you have read. The checklist:
+The graph parser is third-party code that reads my entire codebase, so it gets audited
+before it touches anything. Someone else's tool is reference; the version that runs is the
+one I've read. The checklist:
 
-1. **Verify author and repository.** Confirm the package's listed homepage and repository
-   resolve to the real project you intend to install. A near-miss name is a typosquat
-   flag to clear, not a verdict to trust.
-2. **Grep for network calls.** Search the source for outbound-request machinery
-   (`requests`, `urllib`, `httpx`, `socket`, any API hostnames). Confirm network code
-   exists *only* in the deep/semantic path, never in the default AST flow. If AST mode
-   makes network calls, stop.
-3. **Grep for subprocess and dynamic execution.** Search for `subprocess`, `os.system`,
-   `eval`, `exec`, `pickle.load`. Read every hit line by line.
-4. **Check install-time code.** Confirm the install path has no surprising logic — no
-   download-and-run, no post-install hooks reaching outward.
-5. **Run a known-CVE scan.** Resolve the dependency tree in isolation and scan it with a
-   package-advisory tool. This catches *known-bad* packages; it does not catch novel
-   malicious code — the manual source read is what covers the novel case. Run both and
-   trust neither alone.
+1. **Verify author and repository.** Confirm the package's listed homepage and repo resolve
+   to the real project. A near-miss name is a typosquat flag to clear, not to trust.
+2. **Grep for network calls.** Search for outbound-request machinery. Confirm network code
+   exists *only* in the deep path, never in the default AST flow. If AST mode makes network
+   calls, stop.
+3. **Grep for subprocess and dynamic execution.** `subprocess`, `os.system`, `eval`,
+   `exec`, `pickle.load` — read every hit.
+4. **Check install-time code.** No download-and-run, no post-install hooks reaching out.
+5. **Run a known-CVE scan.** Resolve the dependency tree in isolation and scan it. This
+   catches *known*-bad packages; it doesn't catch novel malicious code — the manual read
+   covers that case. Run both, trust neither alone.
 
 Install into a project-local virtual environment. Never install a code-reading tool
-globally. In this reference the parser is [`graphify`](https://pypi.org/project/graphifyy/)
-(the AST-only mode of a public PyPI package); the checklist above is tool-agnostic and
-applies to anything you let read your source.
+globally. Here the parser is [`graphify`](https://pypi.org/project/graphifyy/) (the
+AST-only mode of a public PyPI package); the checklist is tool-agnostic and applies to
+anything you let read your source.
+
+---
+
+## How skills get made
+
+Over time the vault becomes raw material for **skills**: small reusable routines the agent
+can call by name instead of re-deriving each session. But how they get created is
+constrained on purpose, because the easy failure mode is a pile of plausible-looking
+routines nobody actually validated.
+
+The rule: **do it twice by hand before it becomes a skill.** A procedure earns a name only
+after it's been run manually, in full, at least twice — enough to know its real shape and
+edge cases and that it's worth keeping. A routine written before it's ever been run is a
+guess with a name on it.
+
+Two things keep this safe. It's **operator-driven, not self-improving** — I decide a
+pattern has earned promotion; the agent doesn't mint itself new capabilities on its own,
+which would be the same auto-ingest hazard the memory pipeline already designs out. And
+skills are **distilled from the vault**, which already holds what actually happened each
+session, under redaction — so they're grounded in real work, not an imagined ideal of it.
+
+The skill definitions themselves aren't shipped here (see the omissions below), but the
+discipline for making them is the part that transfers.
 
 ---
 
 ## The cockpit (concept)
 
-A system with a redaction pipeline, a quarantine pile, and a code graph accumulates state
-worth seeing at a glance: what got masked, what is waiting in quarantine and why, when the
-graph last rebuilt. The reference design for that is a **local control panel** — described
-here in concept, deliberately not rendered.
+A system with a redaction pipeline, a quarantine pile, and a code graph builds up state
+worth seeing at a glance — what got masked, what's waiting in quarantine and why, when the
+graph last rebuilt. The design for that is a **local control panel**, described here in
+concept, not rendered.
 
-Its safety properties are the point:
+Its safety properties are the point. It's **loopback-only** (`127.0.0.1`) and never
+network-reachable — a local page, not a service. It's **read-mostly and policy-constrained**:
+it reads the same plain files the scripts already write, surfaces state, and flips only the
+safe switches. It *cannot* enable deep mode and *cannot* disable redaction on a
+customer-data repo — those are policy constants, not toggles. And it has **no new backend** —
+no daemon, no database, no new data store. A heavier thing with its own backend would itself
+land in compliance scope and become a new attack surface; a static local page over plain
+files does the job with none of that.
 
-- **Loopback-only.** It binds to `127.0.0.1` and is never network-reachable. It is a local
-  page, not a service.
-- **Read-mostly, and policy-constrained.** It reads the same plain files the scripts
-  already write. It surfaces state and flips the safe switches. It **cannot** enable deep
-  mode and **cannot** disable redaction on a customer-data repository — those are policy
-  constants, not user-toggleable settings. The panel exposes only switches that are safe
-  to flip.
-- **No new backend.** No daemon, no database, no new data store. A heavier "OS" with its
-  own backend would itself become a thing in compliance scope and a fresh attack surface;
-  a static local page over plain files does the job with none of that.
-
-The one piece worth building early is the **quarantine reviewer**: deny-by-default creates
-a review pile by design, and if reviewing that pile means opening files by hand, the review
-step gets skipped — and a skipped review defeats the whole strict posture. Make reviewing
-held items a one-screen, two-action task (approve into the vault, or discard) so the review
-actually happens.
+The one piece worth building early is the **quarantine reviewer.** Deny-by-default creates a
+review pile by design, and if reviewing it means opening files by hand one at a time, the
+review gets skipped — and a skipped review defeats the whole strict posture. Make it a
+one-screen, two-action task (approve into the vault, or discard) so the review actually
+happens.
 
 ---
 
-## Two-agent workflow and recon-first
+## Two-agent workflow, and recon-first
 
-The discipline that makes all of the above safe to operate is a **two-agent split**:
+The discipline that makes all of this safe to run is a **two-agent split.** An orchestrator
+plans, audits, and holds the decision points — it reasons and reviews, it doesn't execute
+file operations itself. An executor does the work: reads, writes, commands. The value is
+that two different checkers catch more than one, so I don't collapse the roles.
 
-- An **orchestrator** plans, audits, and holds the decision points. It reasons and reviews;
-  it does not execute file operations itself.
-- An **executor** does the work: reads, writes, runs commands. It executes; it does not own
-  the judgment calls or the gates.
-
-The value is orthogonality — two different checkers catch more than one, and collapsing the
-roles defeats the structure.
-
-Riding on top of that is one principle worth stating on its own: **every handoff claim is a
-premise to verify, not settled ground truth.** A note that says a thing is done is a claim
-to check against the actual disk state before acting on it, because across real sessions
-those claims have been wrong often enough that trusting them is the expensive path. Recon
-before writing, every session. The map is not the territory; read the territory.
+Riding on top is one principle worth stating on its own: **every handoff claim is a premise
+to verify, not settled fact.** A note that says something is done is a claim to check
+against the actual state on disk before acting on it — because across real sessions those
+claims have been wrong often enough that trusting them is the expensive path. Recon before
+writing, every session.
 
 ---
 
-## How the system grows skills
+## What this reference deliberately leaves out
 
-The memory layer is not just a record — over time it becomes the raw material for
-**skills**: small, reusable routines the agent can invoke by name instead of re-deriving a
-procedure from scratch each session. But the way skills get created is deliberately
-constrained, because the failure mode here is a system that generates plausible-looking
-routines nobody actually validated.
+To keep the privacy line honest, some things are intentionally not here, in any form:
 
-The governing rule is **do it twice by hand before it becomes a skill.** A procedure earns
-promotion into a named skill only after it has been performed manually, in full, at least
-twice — enough to know its real shape, its edge cases, and that it is worth keeping. A
-routine written speculatively, before it has ever been run against reality, is a guess with
-a name on it.
-
-Two properties keep this safe:
-
-- **Operator-driven, not self-improving.** Skills are distilled from *observed* recurring
-  patterns by the person running the system — not minted autonomously by the agent. The
-  agent does not decide, on its own, that a pattern is now a skill and write itself a new
-  capability. That would be the same auto-ingest hazard the memory pipeline already designs
-  out, wearing a different label. Pattern recognition is the operator's call.
-- **Distilled from the vault, not from thin air.** Because the vault already accumulates
-  what actually happened each session — under redaction, deny-first — it is a corpus of
-  real, sanitized workflow history. Skills mined from that corpus are grounded in work that
-  was really done, not in an imagined ideal of how the work might go.
-
-The result is a skill layer that grows slowly and on purpose: proven routines only,
-promoted by a human, sourced from a memory that was itself built carefully. The skill
-*definitions* themselves are not shipped in this reference — see the omissions below — but
-the discipline for creating them is the transferable part, and it is the point.
-
----
-
-## What this reference deliberately omits
-
-To keep the privacy boundary honest, some things are intentionally not in this repository,
-in any form:
-
-- **The real detection patterns.** The Stage-1 regexes and Stage-2 heuristics that run in
-  the private system are not here. The illustrative patterns shown are authored fresh for
-  teaching and are not a ruleset to depend on.
+- **The real detection patterns.** The Stage-1 regexes and Stage-2 heuristics that actually
+  run aren't here. The examples shown are written fresh for teaching, not a ruleset to
+  depend on.
 - **The denylist and allowlist contents.** Never, in any form.
-- **Real paths, a real stack, real module and schema names.** The system runs on a specific
-  stack against a specific codebase; naming either fingerprints the private system to no
-  teaching benefit. Everything here speaks in roles, not brands.
-- **Skill definitions.** The agent's saved routines are described in concept elsewhere, not
-  shipped here as runnable bodies.
+- **Real paths, the real stack, real module and schema names.** Naming them fingerprints
+  the real system for no teaching benefit. Everything here speaks in roles, not brands.
+- **The skill definitions.** Described in concept, not shipped as runnable bodies.
 
-This is the same deny-by-default posture the redaction pipeline itself runs on, applied to
-the act of publishing: when an element could not be affirmed safe to expose, it stays out.
+This is the same deny-by-default posture the redaction pipeline runs on, applied to the act
+of publishing: when something couldn't be confirmed safe to expose, it stayed out.
 Over-redacting a teaching artifact costs a little completeness. Under-redacting it costs the
-exact thing the artifact is meant to demonstrate.
+exact thing the artifact is meant to show.
