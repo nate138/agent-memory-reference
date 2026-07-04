@@ -1,0 +1,39 @@
+{
+  "_comment": "Example config for the memory system. Copy to memory-config.json and fill in your own paths. All values here are placeholders — replace with your own. Nothing in this file should ever contain real customer data, real secrets, or a real denylist.",
+
+  "projects": {
+    "your-project": {
+      "repo": "you/your-repo",
+      "graph_subdir": "./vault/graph/your-project",
+      "redaction_mode": "strict",
+      "_note": "Use 'strict' for any repo with customer-adjacent data. 'pattern' is a deliberate opt-out only for repos that provably carry none."
+    },
+    "your-secondary-project": {
+      "repo": "you/your-other-repo",
+      "graph_subdir": "./vault/graph/your-secondary-project",
+      "redaction_mode": "pattern"
+    }
+  },
+
+  "paths": {
+    "vault_dir": "./vault/chats/code",
+    "quarantine_dir": "./quarantine/code",
+    "denylist": "./config/known-sensitive.deny",
+    "allowlist": "./config/safe-terms.allow",
+    "_note": "denylist and allowlist are gitignored and generated from your own source of truth. They never ship in this repo, in any form."
+  },
+
+  "graph": {
+    "mode": "ast-only",
+    "deep_mode_allowed": false,
+    "_note": "deep_mode_allowed is a policy constant, not a user toggle. The rebuild trigger refuses deep mode regardless of this value; this key documents intent."
+  },
+
+  "cockpit": {
+    "bind": "127.0.0.1",
+    "network_reachable": false,
+    "can_enable_deep_mode": false,
+    "can_disable_redaction": false,
+    "_note": "Loopback-only. The panel exposes only switches that are safe to flip. Deep mode and redaction-disable are not among them."
+  }
+}
